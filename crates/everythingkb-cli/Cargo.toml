@@ -1,0 +1,15 @@
+[package]
+name = "everythingkb-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "everythingkb"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+everythingkb-core = { path = "../everythingkb-core" }
+tokio.workspace = true

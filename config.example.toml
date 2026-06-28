@@ -1,0 +1,22 @@
+# Copy to ~/.everythingkb/config.toml
+[llm]
+ollama_host = "http://127.0.0.1:11434"
+ollama_model = "batiai/gemma4-e2b:q4"
+n_ctx = 32768
+temperature = 0.3
+
+language = "en"
+pageindex_threshold = 20
+entity_types = ["person", "organization", "place", "product"]
+# Directories walked by `scan` and `watch` (~ expands to $HOME)
+scan_paths = ["~/Documents", "~", "/media", "/mnt"]
+max_file_size_mb = 500
+# Image files (jpg, png, …) — off by default; uses multimodal Ollama when enabled
+image = false
+# llm.vision_model = "llava:7b"  # optional; defaults to llm.ollama_model
+# Video/audio metadata stubs — opt-in
+index_media = false
+# Software profile paths (.config, saves, mods) — opt-in
+index_user_profiles = false
+exclude_patterns = []
+include_patterns = []
