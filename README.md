@@ -1,6 +1,20 @@
 # everythingKB
 
-Personal knowledge base in Rust — [Open Knowledge Format (OKF)](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing) wiki compilation with filesystem discovery.
+A personal, private-first knowledge base in Rust. Your files stay on your machine: a local LLM indexes PDFs, Office docs, notes, and spreadsheets into a searchable wiki under `~/.everythingkb/kb/` — document summaries, cross-linked concepts and entities, and citation-aware chat. Sensitive material (medical, tax, credentials) can live in a separate `wiki/private/` zone that public query never touches. Output uses [Open Knowledge Format (OKF)](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing) markdown you can open in Obsidian or version-control with git.
+
+Inspired by [OpenKB](https://github.com/VectifyAI/OpenKB) (VectifyAI / PageIndex) and Andrej Karpathy's [LLM-wiki pattern](https://gist.github.com/karpathy): ingest documents, compile them into a wiki of summaries, concepts, and entities, and query with PageIndex-style long-document retrieval. Knowledge is compiled once and cross-linked, not re-derived on every question. `everythingkb scan` walks configured folders, ingests only new or changed files (SQLite registry), and compiles updates through your LLM (Ollama or any OpenAI-compatible API such as vLLM).
+
+## Features
+
+- **Private-first** — sensitive docs in a separate `wiki/private/` tree; path rules + LLM detection; public `query`/`chat` never see them (`--private` when you need them)
+- **Local LLM indexing** — compile and query with Ollama or any OpenAI-compatible API (vLLM, etc.); no cloud account required
+- **Filesystem discovery** — `scan`, `add`, and `watch` over configurable roots with smart exclusions (`node_modules`, browser profiles, etc.)
+- **Multi-format convert** — PDF (auto-downloaded pdfium), DOCX, XLSX, CSV, HTML, Markdown, plain text via `mdkit` + `undocx`
+- **LLM wiki compile** — per-document summaries, shared concept pages, and entity pages with OKF frontmatter (`type`, `resource`, `timestamp`)
+- **Long-document indexing** — large PDFs get a PageIndex tree (`pageindex/*.json`) for section-aware Q&A
+- **Query & chat** — ask questions over the wiki with source citations; SQLite-backed chat sessions
+- **Knowledge graph** — `visualize` renders an interactive HTML graph of cross-links
+- **Portable wiki** — git-friendly OKF markdown under `~/.everythingkb/kb/`; opens in Obsidian
 
 ## Quick start
 
@@ -83,6 +97,7 @@ Hidden directories (names starting with `.`) are skipped during scan, except whe
 3. **Long docs** — pdfium page extract → LLM tree → `pageindex/*.json`
 
 PDF support auto-downloads `libpdfium` (chromium/7920) to `~/.cache/everythingkb/pdfium-7920/` on first PDF ingest. No `LD_LIBRARY_PATH` or manual install.
+
 4. **Compile** — OKF summaries (`type`, `resource`, `timestamp`) → concepts + entities → `index.md`
 5. **Query** — wiki context + tree-navigation over PageIndex JSON
 
@@ -126,7 +141,7 @@ Public commands (`chat`, `query`, `visualize`) use only the public wiki by defau
 
 ## Wiki layout
 
-OpenKB-compatible markdown wiki under `wiki/` — opens in Obsidian.
+Same layout as [OpenKB](https://github.com/VectifyAI/OpenKB) (`summaries/`, `concepts/`, `entities/`, `sources/`), output as [OKF v0.1](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) markdown under `wiki/` — opens in Obsidian.
 
 ## License
 
