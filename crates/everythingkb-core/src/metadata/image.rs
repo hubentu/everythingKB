@@ -3,11 +3,16 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::compile::prompts;
-use crate::kb::KbPaths;
+use crate::kb::{KbPaths, WikiScope};
 use crate::llm::build_client;
 use crate::metadata::binary::profile_stub;
 
-pub fn write_image_summary(src: &Path, kb: &KbPaths, doc_name: &str) -> Result<std::path::PathBuf> {
+pub fn write_image_summary(
+    src: &Path,
+    kb: &KbPaths,
+    doc_name: &str,
+    path_private: bool,
+) -> Result<std::path::PathBuf> {
     let config = kb.load_config()?;
     let client = build_client(&config)?;
     let language = &config.language;
@@ -24,7 +29,12 @@ pub fn write_image_summary(src: &Path, kb: &KbPaths, doc_name: &str) -> Result<s
     markdown.push_str(description.trim());
     markdown.push('\n');
 
-    let dest = kb.sources.join(format!("{doc_name}.md"));
+    let scope = if path_private {
+        WikiScope::Private
+    } else {
+        WikiScope::Public
+    };
+    let dest = kb.layout(scope).sources.join(format!("{doc_name}.md"));
     std::fs::write(&dest, markdown)?;
     Ok(dest)
 }

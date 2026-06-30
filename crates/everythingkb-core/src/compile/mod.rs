@@ -5,13 +5,15 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::index;
-use crate::kb::KbPaths;
+use crate::kb::{KbPaths, WikiLayout, WikiScope};
 use crate::llm::{build_client, LlmClient};
+use crate::privacy;
 use crate::wiki;
 
 pub struct CompileOutcome {
     pub doc_name: String,
     pub summary_path: std::path::PathBuf,
+    pub private: bool,
 }
 
 pub fn compile_short_doc(
@@ -19,9 +21,10 @@ pub fn compile_short_doc(
     doc_name: &str,
     source_path: &Path,
     original_path: &Path,
+    path_private: bool,
 ) -> Result<CompileOutcome> {
     let content = wiki::read_page(source_path)?;
-    compile_from_content(kb, doc_name, &content, original_path, false)
+    compile_from_content(kb, doc_name, &content, original_path, false, path_private)
 }
 
 fn compile_from_content(
@@ -30,6 +33,7 @@ fn compile_from_content(
     content: &str,
     original_path: &Path,
     is_long: bool,
+    path_private: bool,
 ) -> Result<CompileOutcome> {
     let config = kb.load_config()?;
     let client = build_client(&config)?;
@@ -38,7 +42,19 @@ fn compile_from_content(
     let system = prompts::system_schema(language, &schema);
 
     let summary_user = prompts::summary_user(doc_name, content);
+    eprintln!("[compile] {doc_name}: summary...");
     let summary_json = client.complete_json(&system, &summary_user)?;
+    let doc_private = privacy::doc_is_private(path_private, &summary_json, config.private_detect);
+    let scope = if doc_private {
+        WikiScope::Private
+    } else {
+        WikiScope::Public
+    };
+    if !path_private && doc_private {
+        promote_sources(kb, doc_name)?;
+    }
+    let layout = kb.layout(scope);
+
     let description = summary_json["description"]
         .as_str()
         .unwrap_or("")
@@ -51,8 +67,10 @@ fn compile_from_content(
     let mut concept_slugs = Vec::new();
     let mut entity_slugs = Vec::new();
 
+    eprintln!("[compile] {doc_name}: concepts/entities...");
     apply_plan(
-        kb,
+        &layout,
+        scope,
         doc_name,
         &summary_body,
         &*client,
@@ -62,10 +80,7 @@ fn compile_from_content(
         &mut entity_slugs,
     )?;
 
-    let targets = wiki::known_targets(kb)?;
-    let whitelist = prompts::known_targets_user(&targets);
-    let _ = client.complete(&system, &whitelist);
-
+    eprintln!("[compile] {doc_name}: final summary...");
     let final_summary = client
         .complete(
             &system,
@@ -76,19 +91,21 @@ fn compile_from_content(
         )
         .unwrap_or(summary_body.clone());
 
-    let summary_path = wiki::summary_path(&kb.summaries, doc_name);
+    let summary_path = wiki::summary_path(&layout.summaries, doc_name);
     let source = wiki::source_path_display(original_path);
     let summary_md = wiki::wrap_summary_frontmatter(
         doc_name,
         &source,
         &description,
         &final_summary,
+        doc_private,
     );
     wiki::write_page(&summary_path, &summary_md)?;
 
-    wiki::backlink_summary(&kb.summaries, doc_name, &concept_slugs)?;
+    wiki::backlink_summary(&layout, scope, doc_name, &concept_slugs)?;
     wiki::update_index(
-        &kb.wiki,
+        &layout.wiki,
+        scope,
         doc_name,
         &concept_slugs,
         &entity_slugs,
@@ -96,15 +113,39 @@ fn compile_from_content(
     )?;
 
     let action = if is_long { "compile-long" } else { "compile" };
-    wiki::append_log(&kb.wiki, action, doc_name)?;
+    wiki::append_log(&layout.wiki, action, doc_name)?;
     Ok(CompileOutcome {
         doc_name: doc_name.into(),
         summary_path,
+        private: doc_private,
     })
 }
 
+fn promote_sources(kb: &KbPaths, doc_name: &str) -> Result<()> {
+    let public = kb.layout(WikiScope::Public);
+    let private = kb.layout(WikiScope::Private);
+    for ext in ["md", "json"] {
+        let from = public.sources.join(format!("{doc_name}.{ext}"));
+        let to = private.sources.join(format!("{doc_name}.{ext}"));
+        if from.exists() {
+            std::fs::create_dir_all(to.parent().unwrap())?;
+            std::fs::rename(from, to)?;
+        }
+    }
+    let pub_idx = kb.pageindex_dir(WikiScope::Public).join(format!("{doc_name}.json"));
+    let priv_idx = kb
+        .pageindex_dir(WikiScope::Private)
+        .join(format!("{doc_name}.json"));
+    if pub_idx.exists() {
+        std::fs::create_dir_all(priv_idx.parent().unwrap())?;
+        std::fs::rename(pub_idx, priv_idx)?;
+    }
+    Ok(())
+}
+
 fn apply_plan(
-    kb: &KbPaths,
+    layout: &WikiLayout,
+    scope: WikiScope,
     doc_name: &str,
     summary: &str,
     client: &dyn LlmClient,
@@ -113,8 +154,9 @@ fn apply_plan(
     concept_slugs: &mut Vec<String>,
     entity_slugs: &mut Vec<String>,
 ) -> Result<()> {
-    let concept_briefs = wiki::briefs_for_dir(&kb.concepts, "concepts")?;
-    let entity_briefs = wiki::briefs_for_dir(&kb.entities, "entities")?;
+    let p = wiki::wiki_link_prefix(scope);
+    let concept_briefs = wiki::briefs_for_dir(&layout.concepts, &format!("{p}concepts"))?;
+    let entity_briefs = wiki::briefs_for_dir(&layout.entities, &format!("{p}entities"))?;
     let plan_user = prompts::concepts_plan_user(&concept_briefs, &entity_briefs, entity_types);
     let plan = match client.complete_json(
         system,
@@ -131,7 +173,7 @@ fn apply_plan(
         for item in items {
             let name = wiki::slugify(item["name"].as_str().unwrap_or("concept"));
             let title = item["title"].as_str().unwrap_or(&name);
-            write_concept(kb, doc_name, &name, title, summary, client, system, false)?;
+            write_concept(layout, doc_name, &name, title, summary, client, system, false)?;
             concept_slugs.push(name);
         }
     }
@@ -139,7 +181,7 @@ fn apply_plan(
         for item in items {
             let name = wiki::slugify(item["name"].as_str().unwrap_or("concept"));
             let title = item["title"].as_str().unwrap_or(&name);
-            write_concept(kb, doc_name, &name, title, summary, client, system, true)?;
+            write_concept(layout, doc_name, &name, title, summary, client, system, true)?;
             if !concept_slugs.contains(&name) {
                 concept_slugs.push(name);
             }
@@ -149,7 +191,7 @@ fn apply_plan(
         for slug in related {
             if let Some(s) = slug.as_str() {
                 let name = wiki::slugify(s);
-                wiki::add_related_link(&kb.concepts, &name, doc_name)?;
+                wiki::add_related_link(layout, scope, &name, doc_name)?;
                 if !concept_slugs.contains(&name) {
                     concept_slugs.push(name);
                 }
@@ -162,7 +204,7 @@ fn apply_plan(
             let name = wiki::slugify(item["name"].as_str().unwrap_or("entity"));
             let title = item["title"].as_str().unwrap_or(&name);
             let etype = item["type"].as_str().unwrap_or("product");
-            write_entity(kb, doc_name, &name, title, etype, summary, client, system, false)?;
+            write_entity(layout, doc_name, &name, title, etype, summary, client, system, false)?;
             entity_slugs.push(name);
         }
     }
@@ -171,7 +213,7 @@ fn apply_plan(
             let name = wiki::slugify(item["name"].as_str().unwrap_or("entity"));
             let title = item["title"].as_str().unwrap_or(&name);
             let etype = item["type"].as_str().unwrap_or("product");
-            write_entity(kb, doc_name, &name, title, etype, summary, client, system, true)?;
+            write_entity(layout, doc_name, &name, title, etype, summary, client, system, true)?;
             if !entity_slugs.contains(&name) {
                 entity_slugs.push(name);
             }
@@ -181,7 +223,7 @@ fn apply_plan(
         for slug in related {
             if let Some(s) = slug.as_str() {
                 let name = wiki::slugify(s);
-                wiki::add_related_link(&kb.entities, &name, doc_name)?;
+                wiki::add_related_link(layout, scope, &name, doc_name)?;
                 if !entity_slugs.contains(&name) {
                     entity_slugs.push(name);
                 }
@@ -193,7 +235,7 @@ fn apply_plan(
 }
 
 fn write_concept(
-    kb: &KbPaths,
+    layout: &WikiLayout,
     doc_name: &str,
     name: &str,
     title: &str,
@@ -202,7 +244,7 @@ fn write_concept(
     system: &str,
     update: bool,
 ) -> Result<()> {
-    let path = wiki::concept_path(&kb.concepts, name);
+    let path = wiki::concept_path(&layout.concepts, name);
     let user = if update && path.exists() {
         let existing = wiki::read_page(&path)?;
         prompts::concept_update_user(doc_name, title, &existing)
@@ -215,11 +257,11 @@ fn write_concept(
     )?;
     let body = page["content"].as_str().unwrap_or("");
     let desc = page["description"].as_str().unwrap_or(title);
-    wiki::write_page(&path, &wiki::wrap_page_frontmatter(title, desc, body))
+    wiki::write_page(&path, &wiki::wrap_page_frontmatter("Concept", title, desc, body))
 }
 
 fn write_entity(
-    kb: &KbPaths,
+    layout: &WikiLayout,
     doc_name: &str,
     name: &str,
     title: &str,
@@ -229,7 +271,7 @@ fn write_entity(
     system: &str,
     update: bool,
 ) -> Result<()> {
-    let path = wiki::entity_path(&kb.entities, name);
+    let path = wiki::entity_path(&layout.entities, name);
     let user = if update && path.exists() {
         let existing = wiki::read_page(&path)?;
         prompts::entity_update_user(doc_name, title, entity_type, &existing)
@@ -242,7 +284,10 @@ fn write_entity(
     )?;
     let body = page["content"].as_str().unwrap_or("");
     let desc = page["description"].as_str().unwrap_or(title);
-    wiki::write_page(&path, &wiki::wrap_page_frontmatter(title, desc, body))
+    wiki::write_page(
+        &path,
+        &wiki::wrap_page_frontmatter(&wiki::entity_okf_type(entity_type), title, desc, body),
+    )
 }
 
 pub fn compile_long_doc(
@@ -250,8 +295,14 @@ pub fn compile_long_doc(
     doc_name: &str,
     raw_pdf: &Path,
     original_path: &Path,
+    path_private: bool,
 ) -> Result<CompileOutcome> {
-    let doc = index::build_page_index(kb, doc_name, raw_pdf)?;
+    let scope = if path_private {
+        WikiScope::Private
+    } else {
+        WikiScope::Public
+    };
+    let doc = index::build_page_index(kb, doc_name, raw_pdf, scope)?;
     let overview = index::tree_overview_markdown(&doc);
-    compile_from_content(kb, doc_name, &overview, original_path, true)
+    compile_from_content(kb, doc_name, &overview, original_path, true, path_private)
 }

@@ -7,17 +7,46 @@ use crate::registry::Registry;
 
 const AGENTS_MD: &str = r#"# Wiki Agent Instructions
 
-This knowledge base follows OpenKB conventions:
-- Summaries in `summaries/`
-- Concepts in `concepts/` with [[wikilinks]]
-- Entities in `entities/`
-- Source material in `sources/`
+This knowledge base follows the [Open Knowledge Format (OKF) v0.1](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md):
+- `summaries/` — document summaries (`type: Document Summary`, `resource` = original file)
+- `concepts/` — abstract ideas (`type: Concept`)
+- `entities/` — named things (`type: Person`, `Organization`, etc.)
+- `sources/` — converted source markdown
+- Cross-links use standard markdown: `[title](concepts/slug.md)`
+- Bundle root `index.md` declares `okf_version: "0.1"`; `log.md` records ingest history
 "#;
 
-const INDEX_MD: &str = r#"# Knowledge Base Index
+const INDEX_MD: &str = r#"---
+okf_version: "0.1"
+---
+
+# Knowledge Base Index
 
 Documents indexed by everythingKB.
 "#;
+
+/// Public or private wiki content directories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WikiScope {
+    Public,
+    Private,
+}
+
+impl WikiScope {
+    pub fn is_private(self) -> bool {
+        matches!(self, Self::Private)
+    }
+}
+
+/// Paths for one wiki zone (public or private).
+#[derive(Debug, Clone)]
+pub struct WikiLayout {
+    pub wiki: PathBuf,
+    pub summaries: PathBuf,
+    pub concepts: PathBuf,
+    pub entities: PathBuf,
+    pub sources: PathBuf,
+}
 
 #[derive(Debug, Clone)]
 pub struct KbPaths {
@@ -30,23 +59,53 @@ pub struct KbPaths {
     pub concepts: PathBuf,
     pub entities: PathBuf,
     pub sources: PathBuf,
+    pub private_wiki: PathBuf,
     pub pageindex: PathBuf,
 }
 
 impl KbPaths {
     pub fn new(root: PathBuf) -> Self {
         let meta = root.join(".everythingkb");
+        let wiki = root.join("wiki");
+        let private_wiki = wiki.join("private");
         Self {
             config_path: Config::default_path(),
             registry_path: meta.join("registry.db"),
-            wiki: root.join("wiki"),
-            summaries: root.join("wiki/summaries"),
-            concepts: root.join("wiki/concepts"),
-            entities: root.join("wiki/entities"),
-            sources: root.join("wiki/sources"),
+            summaries: wiki.join("summaries"),
+            concepts: wiki.join("concepts"),
+            entities: wiki.join("entities"),
+            sources: wiki.join("sources"),
+            private_wiki: private_wiki.clone(),
+            wiki,
             pageindex: meta.join("pageindex"),
             root,
             meta,
+        }
+    }
+
+    pub fn layout(&self, scope: WikiScope) -> WikiLayout {
+        match scope {
+            WikiScope::Public => WikiLayout {
+                wiki: self.wiki.clone(),
+                summaries: self.summaries.clone(),
+                concepts: self.concepts.clone(),
+                entities: self.entities.clone(),
+                sources: self.sources.clone(),
+            },
+            WikiScope::Private => WikiLayout {
+                wiki: self.private_wiki.clone(),
+                summaries: self.private_wiki.join("summaries"),
+                concepts: self.private_wiki.join("concepts"),
+                entities: self.private_wiki.join("entities"),
+                sources: self.private_wiki.join("sources"),
+            },
+        }
+    }
+
+    pub fn pageindex_dir(&self, scope: WikiScope) -> PathBuf {
+        match scope {
+            WikiScope::Public => self.pageindex.clone(),
+            WikiScope::Private => self.pageindex.join("private"),
         }
     }
 
@@ -85,6 +144,7 @@ impl KbPaths {
     pub fn init(root: Option<PathBuf>, config: &Config) -> Result<Self> {
         let kb = root.unwrap_or_else(Self::default_location);
         let paths = Self::new(kb);
+        let private = paths.layout(WikiScope::Private);
 
         for dir in [
             &paths.meta,
@@ -93,8 +153,13 @@ impl KbPaths {
             &paths.concepts,
             &paths.entities,
             &paths.sources,
+            &private.wiki,
+            &private.summaries,
+            &private.concepts,
+            &private.entities,
+            &private.sources,
             &paths.pageindex,
-            &paths.sources.join("images"),
+            &paths.pageindex_dir(WikiScope::Private),
         ] {
             std::fs::create_dir_all(dir)?;
         }
@@ -106,6 +171,13 @@ impl KbPaths {
         let index = paths.wiki.join("index.md");
         if !index.exists() {
             std::fs::write(&index, INDEX_MD)?;
+        }
+        let private_index = private.wiki.join("index.md");
+        if !private_index.exists() {
+            std::fs::write(
+                &private_index,
+                "---\nokf_version: \"0.1\"\n---\n\n# Private Knowledge Base Index\n\nSensitive / personal documents.\n",
+            )?;
         }
         let log = paths.wiki.join("log.md");
         if !log.exists() {
@@ -136,6 +208,9 @@ impl KbPaths {
 
 pub fn wiki_stats(wiki: &Path) -> Result<(usize, usize, usize)> {
     let count = |p: &Path| -> usize {
+        if !p.exists() {
+            return 0;
+        }
         walkdir::WalkDir::new(p)
             .into_iter()
             .filter_map(|e| e.ok())

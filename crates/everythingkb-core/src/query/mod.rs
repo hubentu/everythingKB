@@ -2,16 +2,22 @@ use anyhow::Result;
 
 use crate::compile::prompts;
 use crate::index::{self, PageIndexDoc, TreeNode};
-use crate::kb::KbPaths;
+use crate::kb::{KbPaths, WikiScope};
 use crate::llm::build_client;
 use crate::sessions::SessionStore;
 use crate::wiki;
 
-pub fn query(kb: &KbPaths, question: &str) -> Result<String> {
+pub fn query(kb: &KbPaths, question: &str, scope: WikiScope) -> Result<String> {
     let config = kb.load_config()?;
     let client = build_client(&config)?;
-    let mut context = gather_wiki_context(kb)?;
-    context.push_str(&gather_tree_context(kb, question, &*client, &config.language)?);
+    let mut context = gather_wiki_context(kb, scope)?;
+    context.push_str(&gather_tree_context(
+        kb,
+        question,
+        &*client,
+        &config.language,
+        scope,
+    )?);
 
     let schema = wiki::agents_md(&kb.wiki);
     let system = prompts::system_schema(&config.language, &schema);
@@ -24,8 +30,9 @@ fn gather_tree_context(
     question: &str,
     client: &dyn crate::llm::LlmClient,
     language: &str,
+    scope: WikiScope,
 ) -> Result<String> {
-    let indexes = index::list_page_indexes(kb)?;
+    let indexes = index::list_page_indexes(kb, scope)?;
     if indexes.is_empty() {
         return Ok(String::new());
     }
@@ -61,9 +68,10 @@ fn gather_tree_context(
             let title = item["title"].as_str().unwrap_or("");
             if let Some(doc) = loaded_docs.iter().find(|d| d.doc_name == doc_name) {
                 if let Some(node) = find_node(&doc.tree, title) {
-                    let mut header = format!("### [[summaries/{doc_name}]]: {title}\n");
-                    for src in wiki::summary_sources(kb, doc_name) {
-                        header.push_str(&format!("Original file: {src}\n"));
+                    let page = wiki::okf_page_path(scope, "summaries", doc_name);
+                    let mut header = format!("### [{}]({page}): {title}\n", doc_name);
+                    for src in wiki::summary_sources(kb, doc_name, scope) {
+                        header.push_str(&format!("Resource: {src}\n"));
                     }
                     parts.push(format!(
                         "{header}{}",
@@ -89,12 +97,13 @@ fn find_node<'a>(nodes: &'a [TreeNode], title: &str) -> Option<&'a TreeNode> {
     None
 }
 
-fn gather_wiki_context(kb: &KbPaths) -> Result<String> {
+fn gather_wiki_context(kb: &KbPaths, scope: WikiScope) -> Result<String> {
+    let layout = kb.layout(scope);
     let mut parts = Vec::new();
-    for (dir, prefix) in [
-        (&kb.summaries, "summaries"),
-        (&kb.concepts, "concepts"),
-        (&kb.entities, "entities"),
+    for (dir, kind) in [
+        (&layout.summaries, "summaries"),
+        (&layout.concepts, "concepts"),
+        (&layout.entities, "entities"),
     ] {
         if !dir.exists() {
             continue;
@@ -110,40 +119,64 @@ fn gather_wiki_context(kb: &KbPaths) -> Result<String> {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let wiki_id = format!("{prefix}/{slug}");
+            let page_path = wiki::okf_page_path(scope, kind, &slug);
             let text = wiki::read_page(entry.path())?;
-            parts.push(wiki::format_context_page(&wiki_id, &text));
+            parts.push(wiki::format_context_page(&page_path, &text));
         }
     }
     Ok(parts.join("\n"))
 }
 
-pub fn chat_turn(kb: &KbPaths, session_id: &str, question: &str) -> Result<String> {
+pub fn chat_turn(
+    kb: &KbPaths,
+    session_id: &str,
+    question: &str,
+    scope: WikiScope,
+) -> Result<String> {
     let sessions_path = kb.meta.join("sessions.db");
     let store = SessionStore::open(&sessions_path)?;
     let history = store.get_history(session_id)?;
-    let answer = query_with_history(kb, question, &history)?;
+    let answer = query_with_history(kb, question, &history, scope)?;
     store.append_turn(session_id, question, &answer)?;
     Ok(answer)
 }
 
-fn query_with_history(kb: &KbPaths, question: &str, history: &str) -> Result<String> {
+fn query_with_history(
+    kb: &KbPaths,
+    question: &str,
+    history: &str,
+    scope: WikiScope,
+) -> Result<String> {
     let config = kb.load_config()?;
     let client = build_client(&config)?;
-    let mut context = gather_wiki_context(kb)?;
-    context.push_str(&gather_tree_context(kb, question, &*client, &config.language)?);
+    let mut context = gather_wiki_context(kb, scope)?;
+    context.push_str(&gather_tree_context(
+        kb,
+        question,
+        &*client,
+        &config.language,
+        scope,
+    )?);
     let schema = wiki::agents_md(&kb.wiki);
     let system = prompts::system_schema(&config.language, &schema);
     let user = prompts::chat_user(history, &context, question);
     client.complete(&system, &user)
 }
 
-pub fn chat_repl(kb: &KbPaths, session_id: &str) -> Result<()> {
+pub fn chat_repl(kb: &KbPaths, session_id: &str, scope: WikiScope) -> Result<()> {
     use std::io::{self, BufRead, Write};
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    writeln!(stdout, "everythingKB chat (session: {session_id}). Type 'exit' to quit.")?;
+    let zone = if scope.is_private() {
+        "private"
+    } else {
+        "public"
+    };
+    writeln!(
+        stdout,
+        "everythingKB chat (session: {session_id}, {zone} wiki). Type 'exit' to quit."
+    )?;
     stdout.flush()?;
 
     loop {
@@ -160,7 +193,7 @@ pub fn chat_repl(kb: &KbPaths, session_id: &str) -> Result<()> {
         if q.eq_ignore_ascii_case("exit") || q.eq_ignore_ascii_case("quit") {
             break;
         }
-        match chat_turn(kb, session_id, q) {
+        match chat_turn(kb, session_id, q, scope) {
             Ok(a) => writeln!(stdout, "\n{a}")?,
             Err(e) => writeln!(stdout, "\n[error] {e:#}")?,
         }

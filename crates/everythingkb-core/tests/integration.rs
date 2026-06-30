@@ -20,14 +20,21 @@ fn classifier_markdown() {
 }
 
 #[test]
-fn summary_frontmatter_includes_source() {
+fn summary_frontmatter_okf() {
     let md = wiki::wrap_summary_frontmatter(
         "my-doc",
         "/home/u/Documents/notes/paper.pdf",
         "One sentence summary.",
         "body",
+        false,
     );
+    assert!(md.contains("type: Document Summary"));
+    assert!(md.contains("resource: /home/u/Documents/notes/paper.pdf"));
     assert!(md.contains("description: One sentence summary."));
+    assert!(md.contains("timestamp:"));
+    let private = wiki::wrap_summary_frontmatter("x", "/p", "d", "b", true);
+    assert!(private.contains("tags: [private]"));
+    assert!(private.contains("private: true"));
 }
 
 #[test]

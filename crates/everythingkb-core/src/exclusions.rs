@@ -11,6 +11,8 @@ const DEFAULT_EXCLUDES: &[&str] = &[
     ".local/share/Trash",
     "steamapps/common",
     ".steam",
+    "Old Firefox Data",
+    ".mozilla",
     "/proc",
     "/sys",
     "/dev",
@@ -102,5 +104,12 @@ mod tests {
         let engine = ExclusionEngine::new(&[], &[], 500);
         let p = Path::new("/home/u/.steam/steam/userdata/123/456/remote/save.sav");
         assert!(!engine.should_skip(p));
+    }
+
+    #[test]
+    fn skips_old_firefox_data() {
+        let engine = ExclusionEngine::new(&[], &[], 500);
+        let p = Path::new("/home/u/Desktop/Old Firefox Data/b86n4w9x.default/serviceworker.txt");
+        assert!(engine.should_skip(p));
     }
 }

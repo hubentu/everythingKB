@@ -44,44 +44,53 @@ struct Graph {
     types: Vec<String>,
 }
 
-fn build_graph(kb: &KbPaths) -> Result<Graph> {
+fn build_graph(kb: &KbPaths, include_private: bool) -> Result<Graph> {
     let matter = Matter::<gray_matter::engine::YAML>::new();
     let wikilink_re = Regex::new(r"\[\[([^\]]+)\]\]")?;
+    let md_link_re = Regex::new(r"\[[^\]]*\]\(([^)]+\.md)\)")?;
 
     let mut nodes: HashMap<String, GraphNode> = HashMap::new();
     let mut texts: HashMap<String, String> = HashMap::new();
 
-    for (subdir, default_type) in CONTENT_DIRS {
-        let dir = kb.wiki.join(subdir);
-        if !dir.exists() {
-            continue;
-        }
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|x| x == "md").unwrap_or(false))
-            .collect();
-        paths.sort();
+    let mut roots: Vec<(&Path, &str)> = vec![(kb.wiki.as_path(), "")];
+    if include_private {
+        roots.push((kb.private_wiki.as_path(), "private/"));
+    }
 
-        for path in paths {
-            let stem = path.file_stem().unwrap().to_string_lossy();
-            let nid = format!("{subdir}/{stem}");
-            let text = std::fs::read_to_string(&path)?;
-            texts.insert(nid.clone(), text.clone());
+    for (wiki_root, id_prefix) in roots {
+        for (subdir, default_type) in CONTENT_DIRS {
+            let dir = wiki_root.join(subdir);
+            if !dir.exists() {
+                continue;
+            }
+            let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().map(|x| x == "md").unwrap_or(false))
+                .collect();
+            paths.sort();
 
-            let (node_type, description, sources) = parse_frontmatter(&matter, &text, default_type);
-            nodes.insert(
-                nid.clone(),
-                GraphNode {
-                    id: nid,
-                    label: stem.into_owned(),
-                    node_type,
-                    description,
-                    sources,
-                    out: 0,
-                    in_degree: 0,
-                },
-            );
+            for path in paths {
+                let stem = path.file_stem().unwrap().to_string_lossy();
+                let nid = format!("{id_prefix}{subdir}/{stem}");
+                let text = std::fs::read_to_string(&path)?;
+                texts.insert(nid.clone(), text.clone());
+
+                let (node_type, description, sources) =
+                    parse_frontmatter(&matter, &text, default_type);
+                nodes.insert(
+                    nid.clone(),
+                    GraphNode {
+                        id: nid,
+                        label: stem.into_owned(),
+                        node_type,
+                        description,
+                        sources,
+                        out: 0,
+                        in_degree: 0,
+                    },
+                );
+            }
         }
     }
 
@@ -94,10 +103,18 @@ fn build_graph(kb: &KbPaths) -> Result<Graph> {
     let mut seen: HashSet<(String, String)> = HashSet::new();
 
     for (src, text) in &texts {
+        let mut linked: HashSet<String> = HashSet::new();
         for cap in wikilink_re.captures_iter(text) {
             let raw = cap.get(1).unwrap().as_str();
             let target = raw.split('|').next().unwrap_or(raw).trim();
-            let Some(tgt) = norm.get(&normalize_target(target)) else {
+            linked.insert(normalize_target(target));
+        }
+        for cap in md_link_re.captures_iter(text) {
+            let path = cap.get(1).unwrap().as_str();
+            linked.insert(normalize_target(&link_path_to_id(path)));
+        }
+        for target in linked {
+            let Some(tgt) = norm.get(&target) else {
                 continue;
             };
             if tgt == src {
@@ -155,7 +172,7 @@ fn parse_frontmatter(
             if let Some(d) = pod_str(&data, "description") {
                 description = d;
             }
-            if let Some(s) = pod_str(&data, "source") {
+            if let Some(s) = pod_str(&data, "resource").or_else(|| pod_str(&data, "source")) {
                 sources.push(s);
             }
             if let Pod::Hash(h) = &data {
@@ -222,6 +239,14 @@ fn pod_str(data: &Pod, key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn link_path_to_id(path: &str) -> String {
+    path.trim()
+        .trim_start_matches('/')
+        .strip_suffix(".md")
+        .unwrap_or(path.trim().trim_start_matches('/'))
+        .to_string()
+}
+
 fn normalize_target(target: &str) -> String {
     target
         .to_lowercase()
@@ -243,8 +268,12 @@ fn render_html(graph: &Graph) -> Result<String> {
     Ok(GRAPH_TEMPLATE.replace("__GRAPH_DATA__", &data))
 }
 
-pub fn write_visualization(kb: &KbPaths, output: &Path) -> Result<(usize, usize)> {
-    let graph = build_graph(kb)?;
+pub fn write_visualization(
+    kb: &KbPaths,
+    output: &Path,
+    include_private: bool,
+) -> Result<(usize, usize)> {
+    let graph = build_graph(kb, include_private)?;
     let n_nodes = graph.nodes.len();
     let n_edges = graph.edges.len();
     let html = render_html(&graph)?;

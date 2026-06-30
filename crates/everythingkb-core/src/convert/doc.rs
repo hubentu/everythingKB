@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::convert::{engine, pdf, resolve_doc_name};
-use crate::kb::KbPaths;
+use crate::kb::{KbPaths, WikiScope};
 use crate::registry::Registry;
 
 #[derive(Debug)]
@@ -20,6 +20,7 @@ pub fn convert_document(
     kb: &KbPaths,
     registry: &Registry,
     force: bool,
+    path_private: bool,
 ) -> Result<ConvertResult> {
     let file_hash = Registry::hash_file(src)?;
     let path_key = crate::registry::portable_path(src, &kb.root);
@@ -45,15 +46,18 @@ pub fn convert_document(
         .unwrap_or("")
         .to_lowercase();
 
-    let images_dir = kb.sources.join("images").join(&doc_name);
-    std::fs::create_dir_all(&images_dir)?;
-
     let config = kb.load_config()?;
+    let scope = if path_private {
+        WikiScope::Private
+    } else {
+        WikiScope::Public
+    };
+    let sources = kb.layout(scope).sources;
 
     let (source_path, is_long_doc) = match ext.as_str() {
         "md" | "markdown" | "txt" => {
             let markdown = std::fs::read_to_string(src)?;
-            let dest = kb.sources.join(format!("{doc_name}.md"));
+            let dest = sources.join(format!("{doc_name}.md"));
             std::fs::write(&dest, markdown)?;
             (Some(dest), false)
         }
@@ -68,10 +72,11 @@ pub fn convert_document(
                     doc_name,
                 });
             }
-            let markdown = engine::to_markdown(src)
-                .or_else(|_| pdf::pdf_full_text(src))
-                .unwrap_or_else(|_| format!("# {doc_name}\n\n(PDF text extraction failed)\n"));
-            let dest = kb.sources.join(format!("{doc_name}.md"));
+            let markdown = engine::to_markdown(src).unwrap_or_else(|e| {
+                eprintln!("[convert] pdf {}: {e:#}", src.display());
+                format!("# {doc_name}\n\n(PDF text extraction failed)\n")
+            });
+            let dest = sources.join(format!("{doc_name}.md"));
             std::fs::write(&dest, markdown)?;
             (Some(dest), false)
         }
@@ -84,7 +89,7 @@ pub fn convert_document(
                     )
                 })
             });
-            let dest = kb.sources.join(format!("{doc_name}.md"));
+            let dest = sources.join(format!("{doc_name}.md"));
             std::fs::write(&dest, markdown)?;
             (Some(dest), false)
         }

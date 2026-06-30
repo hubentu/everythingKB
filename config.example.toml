@@ -1,7 +1,12 @@
 # Copy to ~/.everythingkb/config.toml
 [llm]
+# backend = "ollama"   # default
+# backend = "openai"   # vLLM, LocalAI, etc. (OpenAI-compatible /v1 API)
 ollama_host = "http://127.0.0.1:11434"
 ollama_model = "batiai/gemma4-e2b:q4"
+# openai_base_url = "http://192.168.1.167:8000/v1"
+# openai_model = "/model"          # from GET {base_url}/models
+# openai_api_key = "not-needed"    # vLLM usually ignores this
 n_ctx = 32768
 temperature = 0.3
 
@@ -18,5 +23,8 @@ image = false
 index_media = false
 # Software profile paths (.config, saves, mods) — opt-in
 index_user_profiles = false
+# Sensitive/personal docs → separate wiki/private/ tree
+private_paths = ["~/Documents/medical", "~/Documents/tax"]
+private_detect = true
 exclude_patterns = []
 include_patterns = []

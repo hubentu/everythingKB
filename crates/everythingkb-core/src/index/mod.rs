@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::convert::pdf_pages_text;
-use crate::kb::KbPaths;
+use crate::kb::{KbPaths, WikiScope};
 use crate::llm::build_client;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,7 +31,14 @@ pub struct PageText {
     pub text: String,
 }
 
-pub fn build_page_index(kb: &KbPaths, doc_name: &str, raw_pdf: &Path) -> Result<PageIndexDoc> {
+pub fn build_page_index(
+    kb: &KbPaths,
+    doc_name: &str,
+    raw_pdf: &Path,
+    scope: WikiScope,
+) -> Result<PageIndexDoc> {
+    let layout = kb.layout(scope);
+    let pageindex_dir = kb.pageindex_dir(scope);
     let pages = pdf_pages_text(raw_pdf)
         .with_context(|| format!("extract pages from {}", raw_pdf.display()))?;
 
@@ -48,14 +55,15 @@ pub fn build_page_index(kb: &KbPaths, doc_name: &str, raw_pdf: &Path) -> Result<
             .collect(),
     };
 
-    let json_path = kb.pageindex.join(format!("{doc_name}.json"));
+    let json_path = pageindex_dir.join(format!("{doc_name}.json"));
+    std::fs::create_dir_all(&pageindex_dir)?;
     std::fs::write(&json_path, serde_json::to_string_pretty(&doc)?)?;
 
-    let source_json = kb.sources.join(format!("{doc_name}.json"));
+    let source_json = layout.sources.join(format!("{doc_name}.json"));
     std::fs::write(&source_json, serde_json::to_string_pretty(&doc)?)?;
 
     let overview = tree_overview_markdown(&doc);
-    let md_path = kb.sources.join(format!("{doc_name}.md"));
+    let md_path = layout.sources.join(format!("{doc_name}.md"));
     std::fs::write(&md_path, overview)?;
 
     Ok(doc)
@@ -143,8 +151,8 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-pub fn load_page_index(kb: &KbPaths, doc_name: &str) -> Result<Option<PageIndexDoc>> {
-    let path = kb.pageindex.join(format!("{doc_name}.json"));
+pub fn load_page_index(kb: &KbPaths, doc_name: &str, scope: WikiScope) -> Result<Option<PageIndexDoc>> {
+    let path = kb.pageindex_dir(scope).join(format!("{doc_name}.json"));
     if !path.exists() {
         return Ok(None);
     }
@@ -161,11 +169,12 @@ pub fn node_text(doc: &PageIndexDoc, node: &TreeNode) -> String {
         .join("\n\n")
 }
 
-pub fn list_page_indexes(kb: &KbPaths) -> Result<Vec<PathBuf>> {
-    if !kb.pageindex.exists() {
+pub fn list_page_indexes(kb: &KbPaths, scope: WikiScope) -> Result<Vec<PathBuf>> {
+    let dir = kb.pageindex_dir(scope);
+    if !dir.exists() {
         return Ok(vec![]);
     }
-    Ok(std::fs::read_dir(&kb.pageindex)?
+    Ok(std::fs::read_dir(&dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))

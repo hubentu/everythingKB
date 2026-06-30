@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::convert;
 use crate::kb::KbPaths;
 use crate::metadata;
+use crate::privacy;
 use crate::registry::{file_metadata, portable_path, FileStatus, Registry};
 use crate::scanner;
 use crate::wiki;
@@ -110,6 +111,7 @@ pub fn ingest_file(
             FileStatus::Skipped,
             None,
             Some("not indexable"),
+            false,
         )?;
         log_ingest(verbose, "skip", path, Some("not indexable"));
         return Ok(IngestStats {
@@ -127,9 +129,10 @@ pub fn ingest_file(
     }
 
     log_ingest(verbose, "ingest", path, None);
+    eprintln!("[convert] {}...", path.file_name().unwrap_or_default().to_string_lossy());
 
-    match ingest_one(kb, path, kind, &registry, force) {
-        Ok(doc_name) => {
+    match ingest_one(kb, path, kind, &registry, force, &config) {
+        Ok((doc_name, is_private)) => {
             registry.upsert(
                 &key,
                 &hash,
@@ -138,16 +141,27 @@ pub fn ingest_file(
                 FileStatus::Indexed,
                 Some(&doc_name),
                 None,
+                is_private,
             )?;
+            let log_wiki = if is_private {
+                kb.private_wiki.clone()
+            } else {
+                kb.wiki.clone()
+            };
             wiki::append_log(
-                &kb.wiki,
+                &log_wiki,
                 "ingest",
                 path.file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .as_ref(),
             )?;
-            log_ingest(verbose, "added", path, Some(&doc_name));
+            let detail = if is_private {
+                format!("{doc_name} [private]")
+            } else {
+                doc_name.clone()
+            };
+            log_ingest(verbose, "added", path, Some(&detail));
             Ok(IngestStats {
                 added: 1,
                 ..Default::default()
@@ -162,6 +176,7 @@ pub fn ingest_file(
                 FileStatus::Failed,
                 None,
                 Some(&e.to_string()),
+                false,
             )?;
             eprintln!("[ERROR] {}: {e:#}", path.display());
             log_ingest(verbose, "failed", path, None);
@@ -179,34 +194,49 @@ fn ingest_one(
     kind: FileKind,
     registry: &Registry,
     force: bool,
-) -> Result<String> {
+    config: &Config,
+) -> Result<(String, bool)> {
+    let path_private = privacy::is_private_path(path, config);
     let doc_name = convert::resolve_doc_name(path, kb, registry)?;
 
-    let source = match kind {
+    let (source, private) = match kind {
         FileKind::Document => {
-            let result = convert::convert_document(path, kb, registry, force)?;
+            let result = convert::convert_document(path, kb, registry, force, path_private)?;
             if result.skipped {
-                return Ok(result.doc_name);
+                return Ok((result.doc_name, path_private));
             }
-            result
+            let source = result
                 .source_path
-                .context("missing source after convert")?
+                .context("missing source after convert")?;
+            let outcome =
+                compile::compile_short_doc(kb, &doc_name, &source, path, path_private)?;
+            (source, outcome.private)
         }
         FileKind::LongDocument => {
-            let result = convert::convert_document(path, kb, registry, force)?;
+            let result = convert::convert_document(path, kb, registry, force, path_private)?;
             if result.skipped {
-                return Ok(result.doc_name);
+                return Ok((result.doc_name, path_private));
             }
-            compile::compile_long_doc(kb, &doc_name, path, path)?;
-            return Ok(doc_name);
+            let outcome = compile::compile_long_doc(kb, &doc_name, path, path, path_private)?;
+            return Ok((doc_name, outcome.private));
         }
-        FileKind::UserProfile => metadata::write_metadata_stub(path, kb, &doc_name)?,
-        FileKind::Image => metadata::write_image_summary(path, kb, &doc_name)?,
+        FileKind::UserProfile => {
+            let source = metadata::write_metadata_stub(path, kb, &doc_name, path_private)?;
+            let outcome =
+                compile::compile_short_doc(kb, &doc_name, &source, path, path_private)?;
+            (source, outcome.private)
+        }
+        FileKind::Image => {
+            let source = metadata::write_image_summary(path, kb, &doc_name, path_private)?;
+            let outcome =
+                compile::compile_short_doc(kb, &doc_name, &source, path, path_private)?;
+            (source, outcome.private)
+        }
         FileKind::Skip => anyhow::bail!("unexpected skip"),
     };
 
-    compile::compile_short_doc(kb, &doc_name, &source, path)?;
-    Ok(doc_name)
+    let _ = source;
+    Ok((doc_name, private))
 }
 
 pub fn init_kb(root: Option<PathBuf>) -> Result<KbPaths> {

@@ -3,12 +3,35 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LlmBackend {
+    Ollama,
+    Openai,
+}
+
+impl Default for LlmBackend {
+    fn default() -> Self {
+        Self::Ollama
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
+    #[serde(default)]
+    pub backend: LlmBackend,
     #[serde(default = "default_ollama_host")]
     pub ollama_host: String,
     #[serde(default = "default_ollama_model")]
     pub ollama_model: String,
+    /// OpenAI-compatible API base (vLLM, etc.), e.g. `http://192.168.1.167:8000/v1`
+    #[serde(default)]
+    pub openai_base_url: Option<String>,
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
+    /// Model id on the OpenAI-compatible server (falls back to `ollama_model`).
+    #[serde(default)]
+    pub openai_model: Option<String>,
     /// Vision-capable Ollama model for `image = true` ingest. Falls back to `ollama_model`.
     #[serde(default)]
     pub vision_model: Option<String>,
@@ -16,6 +39,19 @@ pub struct LlmConfig {
     pub n_ctx: u32,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+    /// Disable vLLM/Gemma "thinking" tokens (much faster ingest). Default: true.
+    #[serde(default = "default_openai_disable_thinking")]
+    pub openai_disable_thinking: bool,
+    /// Per-request timeout in seconds for OpenAI-compatible backend.
+    #[serde(default = "default_openai_timeout_secs")]
+    pub openai_timeout_secs: u64,
+}
+
+fn default_openai_disable_thinking() -> bool {
+    true
+}
+fn default_openai_timeout_secs() -> u64 {
+    120
 }
 
 fn default_n_ctx() -> u32 {
@@ -34,11 +70,17 @@ fn default_ollama_model() -> String {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
+            backend: LlmBackend::default(),
             ollama_host: default_ollama_host(),
             ollama_model: default_ollama_model(),
+            openai_base_url: None,
+            openai_api_key: None,
+            openai_model: None,
             vision_model: None,
             n_ctx: default_n_ctx(),
             temperature: default_temperature(),
+            openai_disable_thinking: default_openai_disable_thinking(),
+            openai_timeout_secs: default_openai_timeout_secs(),
         }
     }
 }
@@ -71,6 +113,16 @@ pub struct Config {
     /// Index software user-profile paths: .config, saves, mods, userdata (default: off).
     #[serde(default, alias = "index_binary_media")]
     pub index_user_profiles: bool,
+    /// Files under these paths are always stored in the private wiki (`~` expands).
+    #[serde(default)]
+    pub private_paths: Vec<String>,
+    /// Ask the LLM to flag sensitive/personal content during compile (default: on).
+    #[serde(default = "default_private_detect")]
+    pub private_detect: bool,
+}
+
+fn default_private_detect() -> bool {
+    true
 }
 
 fn default_index_media() -> bool {
@@ -112,6 +164,8 @@ impl Default for Config {
             image: false,
             index_media: false,
             index_user_profiles: false,
+            private_paths: Vec::new(),
+            private_detect: default_private_detect(),
         }
     }
 }
@@ -161,6 +215,10 @@ impl Config {
 
     pub fn resolved_scan_paths(&self) -> Vec<PathBuf> {
         self.scan_paths.iter().map(|s| Self::expand_path(s)).collect()
+    }
+
+    pub fn resolved_private_paths(&self) -> Vec<PathBuf> {
+        self.private_paths.iter().map(|s| Self::expand_path(s)).collect()
     }
 }
 

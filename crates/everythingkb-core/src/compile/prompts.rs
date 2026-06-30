@@ -3,7 +3,7 @@ pub fn system_schema(language: &str, schema_md: &str) -> String {
         "You are everythingKB's wiki compilation agent for a personal knowledge base.\n\n\
          {schema_md}\n\n\
          Write all content in {language}.\n\
-         Use [[wikilinks]] to connect related pages (e.g. [[concepts/attention]]).\n\
+         Use OKF markdown links to connect related pages (e.g. [attention](concepts/attention.md)).\n\
          Return ONLY valid JSON when asked for JSON."
     )
 }
@@ -12,13 +12,22 @@ pub fn system_schema(language: &str, schema_md: &str) -> String {
 const MAX_COMPILE_CHARS: usize = 12_000;
 
 fn clip_content(content: &str) -> String {
-    if content.len() <= MAX_COMPILE_CHARS {
+    let mut char_count = 0usize;
+    let mut clip_at = content.len();
+    for (byte_idx, _) in content.char_indices() {
+        if char_count == MAX_COMPILE_CHARS {
+            clip_at = byte_idx;
+            break;
+        }
+        char_count += 1;
+    }
+    if clip_at == content.len() {
         return content.to_string();
     }
-    let omitted = content.len() - MAX_COMPILE_CHARS;
+    let omitted = content[clip_at..].chars().count();
     format!(
         "{}\n\n[... {omitted} chars omitted — summarize from this excerpt ...]",
-        &content[..MAX_COMPILE_CHARS]
+        &content[..clip_at]
     )
 }
 
@@ -41,7 +50,11 @@ pub fn summary_user(doc_name: &str, content: &str) -> String {
          Return a JSON object with two keys:\n\
          - \"description\": A single sentence (under 100 chars) describing the document's main contribution\n\
          - \"content\": The full summary in Markdown. Include key concepts, findings, ideas, \
-         and [[wikilinks]] to concepts that could become cross-document concept pages\n\n\
+         and markdown links to concepts that could become cross-document concept pages \
+         (e.g. [topic](concepts/topic-slug.md))\n\
+         - \"private\": true if the document contains sensitive or personal information \
+         (PII, medical/health records, financial/tax data, credentials, legal ID, intimate personal details); \
+         false otherwise\n\n\
          Return ONLY valid JSON, no fences."
     )
 }
@@ -75,11 +88,12 @@ pub fn concepts_plan_user(
 
 pub fn known_targets_user(targets: &str) -> String {
     format!(
-        "The wiki currently contains these pages — the COMPLETE list of valid [[wikilink]] targets:\n\n\
+        "The wiki currently contains these pages — the COMPLETE list of valid markdown link targets:\n\n\
          {targets}\n\n\
-         Rules for [[wikilinks]] in all subsequent responses:\n\
-         - For [[concepts/X]], [[summaries/Y]], [[entities/Z]]: X/Y/Z must appear above.\n\
-         - Do NOT invent new wikilink targets; use plain text instead."
+         Rules for cross-links in all subsequent responses:\n\
+         - Use `[label](summaries/Y.md)`, `[label](concepts/X.md)`, `[label](entities/Z.md)`.\n\
+         - X/Y/Z must appear in the list above.\n\
+         - Do NOT invent new link targets; use plain text instead."
     )
 }
 
@@ -93,7 +107,7 @@ pub fn concept_page_user(doc_name: &str, title: &str, update: bool) -> String {
         "Write the concept page for: {title}\n\n\
          This concept relates to document \"{doc_name}\" summarized above.\n\
          {update_instruction}\n\n\
-         Return JSON with keys \"description\" (one sentence) and \"content\" (full Markdown with [[wikilinks]]).\n\
+         Return JSON with keys \"description\" (one sentence) and \"content\" (full Markdown with OKF links).\n\
          Return ONLY valid JSON."
     )
 }
@@ -129,7 +143,7 @@ pub fn entity_update_user(doc_name: &str, title: &str, entity_type: &str, existi
 pub fn summary_rewrite_user() -> String {
     "Rewrite the summary you wrote above into a final version consistent with concept pages \
      now in the wiki (per the whitelist message).\n\n\
-     Preserve factual claims. Fix [[wikilinks]] per whitelist rules.\n\n\
+     Preserve factual claims. Fix cross-links per whitelist rules.\n\n\
      Return ONLY the rewritten Markdown (no JSON, no fences)."
         .into()
 }
@@ -145,9 +159,9 @@ pub fn long_doc_summary_user(doc_name: &str, doc_id: &str, content: &str) -> Str
 pub fn query_user(question: &str, wiki_context: &str) -> String {
     format!(
         "Answer the question using ONLY the wiki context below.\n\
-         When you use a fact, cite the wiki page inline (e.g. [[summaries/paper-name]]).\n\
+         When you use a fact, cite the wiki page inline (e.g. [paper-name](summaries/paper-name.md)).\n\
          End with a **Sources** section listing every wiki page you used and any \
-         `Original file:` paths shown in the context. Omit **Sources** only if the context \
+         `Resource:` paths shown in the context. Omit **Sources** only if the context \
          has nothing relevant.\n\n\
          Wiki context:\n{wiki_context}\n\n\
          Question: {question}"
@@ -158,9 +172,9 @@ pub fn chat_user(history: &str, wiki_context: &str, question: &str) -> String {
     format!(
         "Conversation history:\n{history}\n\n\
          Answer using ONLY the wiki context below.\n\
-         When you use a fact, cite the wiki page inline (e.g. [[summaries/paper-name]]).\n\
+         When you use a fact, cite the wiki page inline (e.g. [paper-name](summaries/paper-name.md)).\n\
          End with a **Sources** section listing every wiki page you used and any \
-         `Original file:` paths shown in the context. Omit **Sources** only if the context \
+         `Resource:` paths shown in the context. Omit **Sources** only if the context \
          has nothing relevant.\n\n\
          Wiki context:\n{wiki_context}\n\n\
          User: {question}"
@@ -175,4 +189,18 @@ pub fn tree_select_user(question: &str, trees: &str) -> String {
          Return JSON: {{\"selections\": [{{\"doc_name\": \"...\", \"title\": \"section title\"}}]}}\n\
          Return ONLY valid JSON."
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clip_content_respects_utf8_boundaries() {
+        let s = "中".repeat(12_001);
+        let clipped = clip_content(&s);
+        assert!(clipped.contains('中'));
+        assert!(clipped.contains("chars omitted"));
+        assert!(std::str::from_utf8(clipped.as_bytes()).is_ok());
+    }
 }

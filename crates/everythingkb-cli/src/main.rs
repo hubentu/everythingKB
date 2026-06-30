@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use everythingkb_core::ingest::{init_kb, ingest_path, scan, watch_roots};
-use everythingkb_core::kb::{self, KbPaths};
+use everythingkb_core::kb::{self, KbPaths, WikiScope};
 use everythingkb_core::query;
 use everythingkb_core::visualize;
 
@@ -46,18 +46,24 @@ enum Commands {
     /// Ask a question over the compiled wiki
     Query {
         question: String,
+        /// Search the private wiki instead of public
+        #[arg(long)]
+        private: bool,
     },
     /// Interactive chat over the wiki
     Chat {
         question: Option<String>,
         #[arg(long, default_value = "default")]
         session: String,
+        /// Chat over the private wiki instead of public
+        #[arg(long)]
+        private: bool,
     },
     /// Show registry and wiki stats
     Status,
     /// List indexed documents
     List,
-    /// Render wiki [[wikilink]] graph as interactive HTML
+    /// Render OKF knowledge graph as interactive HTML
     Visualize {
         /// Output HTML file (default: wiki/graph.html)
         #[arg(short, long)]
@@ -65,6 +71,9 @@ enum Commands {
         /// Open in default browser after generating
         #[arg(long)]
         open: bool,
+        /// Include private wiki pages in the graph
+        #[arg(long)]
+        private: bool,
     },
 }
 
@@ -76,8 +85,24 @@ fn main() -> Result<()> {
             let config = paths.load_config()?;
             println!("Initialized KB at {}", paths.root.display());
             println!("Config: {}", paths.config_path.display());
-            println!("Ollama model: `{}`", config.llm.ollama_model);
-            println!("Run: ollama pull {}", config.llm.ollama_model);
+            println!("LLM backend: {:?}", config.llm.backend);
+            match config.llm.backend {
+                everythingkb_core::config::LlmBackend::Openai => {
+                    println!(
+                        "OpenAI-compatible: {} model `{}`",
+                        config.llm.openai_base_url.as_deref().unwrap_or("?"),
+                        config
+                            .llm
+                            .openai_model
+                            .as_deref()
+                            .unwrap_or(&config.llm.ollama_model)
+                    );
+                }
+                everythingkb_core::config::LlmBackend::Ollama => {
+                    println!("Ollama model: `{}`", config.llm.ollama_model);
+                    println!("Run: ollama pull {}", config.llm.ollama_model);
+                }
+            }
             print_scan_paths(&config);
         }
         Commands::Scan { dry_run, verbose } => {
@@ -94,30 +119,47 @@ fn main() -> Result<()> {
             let stats = ingest_path(&kb, &path, dry_run, force, verbose)?;
             print_stats(&stats);
         }
-        Commands::Query { question } => {
+        Commands::Query { question, private } => {
             let kb = KbPaths::open(cli.kb)?;
-            let answer = query::query(&kb, &question)?;
+            let scope = if private {
+                WikiScope::Private
+            } else {
+                WikiScope::Public
+            };
+            let answer = query::query(&kb, &question, scope)?;
             println!("{answer}");
         }
-        Commands::Chat { question, session } => {
+        Commands::Chat {
+            question,
+            session,
+            private,
+        } => {
             let kb = KbPaths::open(cli.kb)?;
+            let scope = if private {
+                WikiScope::Private
+            } else {
+                WikiScope::Public
+            };
             if let Some(q) = question {
-                let answer = query::chat_turn(&kb, &session, &q)?;
+                let answer = query::chat_turn(&kb, &session, &q, scope)?;
                 println!("{answer}");
             } else {
-                query::chat_repl(&kb, &session)?;
+                query::chat_repl(&kb, &session, scope)?;
             }
         }
         Commands::Status => {
             let kb = KbPaths::open(cli.kb)?;
             let registry = kb.open_registry()?;
             let stats = registry.stats()?;
-            let (summaries, concepts, entities) = kb::wiki_stats(&kb.wiki)?;
+            let (pub_s, pub_c, pub_e) = kb::wiki_stats(&kb.wiki)?;
+            let (priv_s, priv_c, priv_e) = kb::wiki_stats(&kb.private_wiki)?;
             println!("KB: {}", kb.root.display());
             println!("Registry: {} total, {} indexed, {} failed, {} pending",
                 stats.total, stats.indexed, stats.failed, stats.pending);
-            println!("Wiki: {} summaries, {} concepts, {} entities",
-                summaries, concepts, entities);
+            println!("Public wiki: {} summaries, {} concepts, {} entities",
+                pub_s, pub_c, pub_e);
+            println!("Private wiki: {} summaries, {} concepts, {} entities",
+                priv_s, priv_c, priv_e);
             let config = kb.load_config()?;
             print_scan_paths(&config);
         }
@@ -125,13 +167,19 @@ fn main() -> Result<()> {
             let kb = KbPaths::open(cli.kb)?;
             let registry = kb.open_registry()?;
             for rec in registry.list_indexed()? {
-                println!("{}  [{}]", rec.path, rec.doc_name.unwrap_or_default());
+                let tag = if rec.private { " [private]" } else { "" };
+                println!(
+                    "{}  [{}]{}",
+                    rec.path,
+                    rec.doc_name.unwrap_or_default(),
+                    tag
+                );
             }
         }
-        Commands::Visualize { output, open } => {
+        Commands::Visualize { output, open, private } => {
             let kb = KbPaths::open(cli.kb)?;
             let out = output.unwrap_or_else(|| kb.wiki.join("graph.html"));
-            let (nodes, edges) = visualize::write_visualization(&kb, &out)?;
+            let (nodes, edges) = visualize::write_visualization(&kb, &out, private)?;
             println!(
                 "Wrote {} ({} nodes, {} edges)",
                 out.display(),

@@ -41,6 +41,7 @@ pub struct FileRecord {
     pub status: FileStatus,
     pub doc_name: Option<String>,
     pub error: Option<String>,
+    pub private: bool,
 }
 
 pub struct Registry {
@@ -63,11 +64,13 @@ impl Registry {
                 status TEXT NOT NULL DEFAULT 'pending',
                 doc_name TEXT,
                 error TEXT,
+                private INTEGER NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
             );
             CREATE INDEX IF NOT EXISTS idx_files_hash ON files(file_hash);
             CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);",
         )?;
+        migrate(&conn)?;
         Ok(Self { conn })
     }
 
@@ -88,19 +91,11 @@ impl Registry {
 
     pub fn get(&self, path: &str) -> Result<Option<FileRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT path, file_hash, mtime, size, status, doc_name, error FROM files WHERE path = ?1",
+            "SELECT path, file_hash, mtime, size, status, doc_name, error, private FROM files WHERE path = ?1",
         )?;
         let mut rows = stmt.query(params![path])?;
         if let Some(row) = rows.next()? {
-            Ok(Some(FileRecord {
-                path: row.get(0)?,
-                file_hash: row.get(1)?,
-                mtime: row.get(2)?,
-                size: row.get(3)?,
-                status: FileStatus::from_str(row.get::<_, String>(4)?.as_str()),
-                doc_name: row.get(5)?,
-                error: row.get(6)?,
-            }))
+            Ok(Some(row_to_record(row)?))
         } else {
             Ok(None)
         }
@@ -126,10 +121,11 @@ impl Registry {
         status: FileStatus,
         doc_name: Option<&str>,
         error: Option<&str>,
+        private: bool,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO files (path, file_hash, mtime, size, status, doc_name, error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO files (path, file_hash, mtime, size, status, doc_name, error, private)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(path) DO UPDATE SET
                file_hash = excluded.file_hash,
                mtime = excluded.mtime,
@@ -137,6 +133,7 @@ impl Registry {
                status = excluded.status,
                doc_name = excluded.doc_name,
                error = excluded.error,
+               private = excluded.private,
                updated_at = strftime('%s','now')",
             params![
                 path,
@@ -145,7 +142,8 @@ impl Registry {
                 size,
                 status.as_str(),
                 doc_name,
-                error
+                error,
+                private as i32
             ],
         )?;
         Ok(())
@@ -180,22 +178,40 @@ impl Registry {
 
     pub fn list_indexed(&self) -> Result<Vec<FileRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT path, file_hash, mtime, size, status, doc_name, error FROM files
+            "SELECT path, file_hash, mtime, size, status, doc_name, error, private FROM files
              WHERE status = 'indexed' ORDER BY path",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(FileRecord {
-                path: row.get(0)?,
-                file_hash: row.get(1)?,
-                mtime: row.get(2)?,
-                size: row.get(3)?,
-                status: FileStatus::from_str(row.get::<_, String>(4)?.as_str()),
-                doc_name: row.get(5)?,
-                error: row.get(6)?,
-            })
-        })?;
+        let rows = stmt.query_map([], row_to_record)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+}
+
+fn migrate(conn: &Connection) -> Result<()> {
+    let has_private: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name = 'private'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_private == 0 {
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN private INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRecord> {
+    Ok(FileRecord {
+        path: row.get(0)?,
+        file_hash: row.get(1)?,
+        mtime: row.get(2)?,
+        size: row.get(3)?,
+        status: FileStatus::from_str(row.get::<_, String>(4)?.as_str()),
+        doc_name: row.get(5)?,
+        error: row.get(6)?,
+        private: row.get::<_, i32>(7)? != 0,
+    })
 }
 
 #[derive(Debug, Clone)]

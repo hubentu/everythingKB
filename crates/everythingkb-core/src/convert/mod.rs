@@ -61,6 +61,6 @@ fn name_taken(candidate: &str, registry: &Registry) -> bool {
         .unwrap_or(false)
 }
 
-pub fn convert_document(src: &Path, kb: &KbPaths, registry: &Registry, force: bool) -> Result<ConvertResult> {
-    doc::convert_document(src, kb, registry, force)
+pub fn convert_document(src: &Path, kb: &KbPaths, registry: &Registry, force: bool, path_private: bool) -> Result<ConvertResult> {
+    doc::convert_document(src, kb, registry, force, path_private)
 }
